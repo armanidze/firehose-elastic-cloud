@@ -1,0 +1,484 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Deploy Eventbridge-Firehose-Lambda-S3-SQS-Elastic Agent 
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Elastic Cloud Deployment Configuration
+        Parameters:
+          - DeploymentName
+          - Region
+      - Label:
+          default: Amazon Network configuration
+        Parameters:
+          - VPCID
+          - PublicSubnet1ID
+          - PublicSubnet2ID
+          - RemoteAccessCIDR
+      - Label:
+          default: Amazon EC2 configuration
+        Parameters:
+          - KeyPairName
+          - EC2InstanceType
+    ParameterLabels:
+      EC2InstanceType:
+        default: EC2 instance type
+      KeyPairName:
+        default: Key pair name
+      PublicSubnet1ID:
+        default: Public subnet 1 ID
+      PublicSubnet2ID:
+        default: Public subnet 2 ID
+      RemoteAccessCIDR:
+        default: Allowed EC2 external access CIDR
+      VPCID:
+        default: VPC ID
+      RootVolumeSize:
+        default: Root volume size
+Parameters:
+  Region:
+    Type: String
+    Default: us-east-1
+    AllowedValues:
+    - af-south-1
+    - ap-east-1
+    - ap-northeast-1
+    - ap-northeast-2
+    - ap-south-1
+    - ap-southeast-1
+    - ap-southeast-2
+    - eu-central-1
+    - eu-south-1
+    - eu-west-1
+    - eu-west-2
+    - eu-west-3
+    - me-south-1
+    - sa-east-1
+    - us-east-1
+    - us-east-2
+    - us-west-1
+    - us-west-2
+    - ca-central-1
+    Description: Enter us-east-1 or other regions from list. Default is us-east-1.
+  DeploymentName:
+    AllowedPattern: ^[a-z0-9-]+
+    ConstraintDescription: Deployment name must be unique and can include lowercase letters (a-z), numbers (0-9), and dashes (-).
+    Description: Deployment name must be unique and can include lowercase letters (a-z), numbers (0-9), and dashes (-).
+    Type: String
+    Default: my-deployment
+  KeyPairName:
+    Description: Name of an existing public/private key pair. If you do not have one in this AWS Region,
+      please create it before continuing.
+    Type: 'AWS::EC2::KeyPair::KeyName'
+  EC2InstanceType:
+    AllowedValues:
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+      - t4g.nano
+      - t4g.micro
+      - t4g.small
+      - t4g.medium
+      - t4g.large
+      - t4g.xlarge
+      - t4g.2xlarge
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+      - m4.4xlarge
+    Default: t2.micro
+    Description: Amazon EC2 instance type for the EC2 instances.
+    Type: String
+  PublicSubnet1ID:
+    Description: ID of the public subnet 1 that you want to provision the first EC2 into (e.g., subnet-a0246dcd).
+    Type: 'AWS::EC2::Subnet::Id'
+  PublicSubnet2ID:
+    Description: ID of the public subnet 2 that you want to provision the second EC2 into (e.g., subnet-e3246d8e).
+    Type: 'AWS::EC2::Subnet::Id'
+  RemoteAccessCIDR:
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$
+    ConstraintDescription: CIDR block parameter must be in the form x.x.x.x/x
+    Description: Allowed CIDR block for external SSH access to the EC2s.
+    Type: String
+  VPCID:
+    Description: ID of the VPC (e.g., vpc-0343606e).
+    Type: 'AWS::EC2::VPC::Id'
+Rules:
+  SubnetsInVPC:
+    Assertions:
+      - Assert:
+          'Fn::EachMemberIn':
+            - 'Fn::ValueOfAll':
+                - 'AWS::EC2::Subnet::Id'
+                - VpcId
+            - 'Fn::RefAll': 'AWS::EC2::VPC::Id'
+        AssertDescription: All subnets must exist in the VPC.
+Mappings:
+  AWSAMIRegionMap:
+    af-south-1:
+      US2004HVM: ami-022666956ad401a1
+    ap-northeast-1:
+      US2004HVM: ami-015f1a68ce825a8d2
+    ap-northeast-2:
+      US2004HVM: ami-0be9734c9e68b99f4
+    ap-northeast-3:
+      US2004HVM: ami-01cb3e73f8ef13fdc
+    ap-south-1:
+      US2004HVM: ami-00aaac1f2ef4ce965
+    ap-southeast-1:
+      US2004HVM: ami-0012ffabeb7413479
+    ap-southeast-2:
+      US2004HVM: ami-03ec1fe05b3849c74
+    ca-central-1:
+      US2004HVM: ami-04c56d394d31cdeac
+    eu-central-1:
+      US2004HVM: ami-0980c5102b5ef10cc
+    me-south-1:
+      US2004HVM: ami-03cc0b5db8321f2e5
+    ap-east-1:
+      US2004HVM: ami-0c7e5903bee96ef81
+    eu-north-1:
+      US2004HVM: ami-0663a4867a210287a
+    eu-south-1:
+      US2004HVM: ami-035e213233577516f
+    eu-west-1:
+      US2004HVM: ami-0213344887e47003a
+    eu-west-2:
+      US2004HVM: ami-0add0a5a0cf9afc6c
+    eu-west-3:
+      US2004HVM: ami-01019e7343a5f361d
+    sa-east-1:
+      US2004HVM: ami-0312c74c38dc7bae6
+    us-east-1:
+      US2004HVM: ami-0db6c6238a40c0681
+    us-east-2:
+      US2004HVM: ami-03b6c8bd55e00d5ed
+    us-west-1:
+      US2004HVM: ami-0f5868930cb63c89c
+    us-west-2:
+      US2004HVM: ami-038a0ccaaedae6406
+Resources:
+  LambdaDataTransform:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub "${DeploymentName}-LambdaDataTransformer"
+      Runtime: python3.9
+      Timeout: 120
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaDataTransformFunctionRole.Arn
+      Code:
+        ZipFile:
+          !Sub |
+            #!/usr/bin/env python3
+            import json
+            import boto3
+            import base64
+
+            output = []
+
+            def lambda_handler(event, context):
+    
+             for record in event['records']:
+               payload = base64.b64decode(record['data']).decode('utf-8')
+               print('payload:', payload)
+        
+               row_w_newline = payload + "\n"
+               print('row_w_newline type:', type(row_w_newline))
+               row_w_newline = base64.b64encode(row_w_newline.encode('utf-8'))
+        
+               output_record = {
+                 'recordId': record['recordId'],
+                 'result': 'Ok',
+                 'data': row_w_newline
+                }
+               output.append(output_record)
+
+             print('Processed {} records.'.format(len(event['records'])))
+    
+             return {'records': output}
+  LambdaDataTransformFunctionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - !Sub "lambda.amazonaws.com"
+          Action:
+          - sts:AssumeRole
+      Path: '/'
+      RoleName: !Sub "${DeploymentName}-LambdaDataTransformFunctionRole"
+      Policies:
+      - PolicyName: !Sub "${DeploymentName}-LambdaDataTransformFunctionPolicy-S3"
+        PolicyDocument:
+           Version: '2012-10-17'
+           Statement:
+           - Effect: Allow
+             Action:
+             - s3:AbortMultipartUpload
+             - s3:GetBucketLocation
+             - s3:GetObject
+             - s3:ListBucket
+             - s3:ListBucketMultipartUploads
+             - s3:PutObject
+             Resource:
+             - !Sub 'arn:aws:s3:::${DeploymentName}-bucket'
+             - !Sub 'arn:aws:s3:::${DeploymentName}-bucket/*'
+      - PolicyName: !Sub "${DeploymentName}-LambdaDataTransformFunctionPolicy-KenesisFirehose"
+        PolicyDocument:
+           Version: '2012-10-17'
+           Statement:
+           - Effect: Allow
+             Action:
+             - 'firehose:DescribeDeliveryStream'
+             - 'firehose:ListDeliveryStreams'
+             Resource:
+             - !Sub 'arn:aws:firehose:${Region}:${AWS::AccountId}:deliverystream/*'
+      - PolicyName: !Sub "${DeploymentName}-LambdaDataTransformFunctionPolicy-Logs"
+        PolicyDocument:
+           Version: '2012-10-17'
+           Statement:
+           - Effect: Allow
+             Action:
+             - 'logs:CreateLogGroup'
+             - 'logs:CreateLogStream'
+             - 'logs:PutLogEvents'
+             Resource:
+             - !Sub 'arn:aws:logs:${Region}:${AWS::AccountId}:*'
+  DataProducer:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: "Any EC2 State Change Event Rule - DataProducer"
+      Name: 'Any-EC2-State-Change-Event'
+      EventBusName: "default"
+      EventPattern:
+        source:
+        - aws.ec2
+        detail-type:
+        - "EC2 Instance State-change Notification"
+      State: ENABLED
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          -  KinesisFirehose
+          -  Arn
+        Id: "FirehoseDelivery"
+        RoleArn:
+          Fn::GetAtt:
+          -  DataProducerRole
+          -  Arn 
+  DataProducerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - !Sub "events.amazonaws.com"
+          Action:
+          - sts:AssumeRole
+      Path: '/'
+      RoleName: 'DataProduserRole'
+      Policies:
+      - PolicyName: DataProducerPolicy
+        PolicyDocument:
+           Version: '2012-10-17'
+           Statement:
+           - Effect: Allow
+             Action:
+             - firehose:PutRecord
+             - firehose:PutRecordBatch
+             Resource: !Sub "arn:aws:firehose:${Region}:${AWS::AccountId}:*"
+  CloudwatchLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub "/aws/kinesisfirehose/${DeploymentName}-stream"
+      RetentionInDays: 7
+  FirehoseS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${DeploymentName}-bucket"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: TRUE
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: TRUE
+        BlockPublicPolicy: TRUE
+        IgnorePublicAcls: TRUE
+        RestrictPublicBuckets: TRUE
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt SQSforBeats.Arn
+  KinesisFirehose:
+    Type: 'AWS::KinesisFirehose::DeliveryStream'
+    Properties:
+      DeliveryStreamName: !Sub "${DeploymentName}-stream"
+      DeliveryStreamType: "DirectPut"
+      ExtendedS3DestinationConfiguration:
+        BucketARN: 
+          Fn::GetAtt:
+          -  FirehoseS3Bucket
+          -  Arn
+        CompressionFormat: UNCOMPRESSED  
+        ErrorOutputPrefix: 'error-'
+        Prefix: 'firehose-'
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+          - Type: Lambda
+            Parameters:
+            - ParameterName: LambdaArn
+              ParameterValue: !GetAtt LambdaDataTransform.Arn 
+        RoleARN:
+          Fn::GetAtt:
+          -  KinesisRole
+          -  Arn
+  KinesisRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - firehose.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: '/'
+      RoleName: !Sub "${DeploymentName}-KinesisDeliveryStreamRole"
+      Policies:
+       - PolicyName: !Sub "${DeploymentName}-KinesisDeliveryStreamPolicyS3"
+         PolicyDocument:
+           Version: '2012-10-17'
+           Statement:
+           - Effect: Allow
+             Action:
+             - s3:AbortMultipartUpload
+             - s3:GetBucketLocation
+             - s3:GetObject
+             - s3:ListBucket
+             - s3:ListBucketMultipartUploads
+             - s3:PutObject
+             Resource:
+             - !Sub 'arn:aws:s3:::${DeploymentName}-bucket'
+             - !Sub 'arn:aws:s3:::${DeploymentName}-bucket/*'
+       - PolicyName: !Sub "${DeploymentName}-KinesisDeliveryStreamPutErrCloudWatch"
+         PolicyDocument:
+           Version: '2012-10-17'
+           Statement:
+           - Effect: Allow
+             Action:
+             - log:PutLogEvents
+             Resource:
+             - !Sub "arn:aws:logs:${Region}:${AWS::AccountId}::log-group:/aws/kinesisfirehose/${DeploymentName}-stream:log-stream:*"
+       - PolicyName: !Sub "${DeploymentName}-KinesisDeliveryStreamLambda"
+         PolicyDocument:
+           Version: '2012-10-17'
+           Statement:
+           - Effect: Allow
+             Action:
+             - lambda:InvokeFunction
+             - lambda:GetFunctionConfiguration
+             Resource:
+             - !Sub "arn:aws:lambda:${Region}:${AWS::AccountId}:function:${DeploymentName}-LambdaDataTransformer*"
+  SQSforBeats:
+    Type: 'AWS::SQS::Queue'
+    Properties:
+      QueueName: !Sub "${DeploymentName}-SQSforBeats"
+      MaximumMessageSize: 262144
+      MessageRetentionPeriod: 345600
+      ReceiveMessageWaitTimeSeconds: 0
+      SqsManagedSseEnabled: 'true'
+      VisibilityTimeout: 30
+  SQSforBeatsPolicy:
+    Type: 'AWS::SQS::QueuePolicy'
+    Properties: 
+      Queues: 
+      - Ref: SQSforBeats
+      PolicyDocument: 
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: s3.amazonaws.com
+          Action: SQS:SendMessage
+          Resource: !Sub "arn:aws:sqs:${Region}:${AWS::AccountId}:${DeploymentName}-SQSforBeats"
+          Condition:
+            StringEquals:
+              aws:SourceAccount: !Sub ${AWS::AccountId}
+            ArnLike:
+              aws:SourceArn: !Sub arn:aws:s3:::${DeploymentName}-bucket
+  EC2SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enables SSH Access to EC2 Hosts
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref RemoteAccessCIDR
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: !Ref RemoteAccessCIDR
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 9500
+          CidrIp: !Ref RemoteAccessCIDR
+        - IpProtocol: tcp
+          FromPort: 6780
+          ToPort: 6800
+          CidrIp: !Ref RemoteAccessCIDR             
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      KeyName: !Ref KeyPairName
+      ImageId: !FindInMap
+          - AWSAMIRegionMap
+          - !Ref 'AWS::Region'
+          - 'US2004HVM'
+      SecurityGroups:
+        - !GetAtt EC2SecurityGroup.GroupId
+      InstanceType: !Ref EC2InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 10
+            VolumeType: gp2
+            Encrypted: true
+            DeleteOnTermination: true
+      LaunchConfigurationName: !Ref DeploymentName
+    DependsOn: DataProducer
+  AutoScalingGroup:
+      Type: AWS::AutoScaling::AutoScalingGroup
+      Properties:
+        LaunchConfigurationName: !Ref LaunchConfig
+        MaxSize: '1'
+        MinSize: '1'
+        DesiredCapacity: '1'
+        VPCZoneIdentifier:
+          - !Ref PublicSubnet1ID
+          - !Ref PublicSubnet2ID
+        Tags:
+          - Key: Name
+            Value: !Ref DeploymentName
+            PropagateAtLaunch: true
+
