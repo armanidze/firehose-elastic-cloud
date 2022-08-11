@@ -8,6 +8,8 @@ Metadata:
         Parameters:
           - DeploymentName
           - Region
+          - ElasticCloudId
+          - ElasticSecretKey
       - Label:
           default: Amazon Network configuration
         Parameters:
@@ -21,6 +23,12 @@ Metadata:
           - KeyPairName
           - EC2InstanceType
     ParameterLabels:
+      DeploymentName:
+        default: Deployment Name
+      ElasticCloudId:
+        default: Elastic Cloud ID
+      ElasticSecretKey: 
+        default: Elastic Secret Key
       EC2InstanceType:
         default: EC2 instance type
       KeyPairName:
@@ -61,11 +69,17 @@ Parameters:
     - ca-central-1
     Description: Enter us-east-1 or other regions from list. Default is us-east-1.
   DeploymentName:
-    AllowedPattern: ^[a-z0-9-]+
+    AllowedPattern: ^[a-z0-9-.]*$
     ConstraintDescription: Deployment name must be unique and can include lowercase letters (a-z), numbers (0-9), and dashes (-).
     Description: Deployment name must be unique and can include lowercase letters (a-z), numbers (0-9), and dashes (-).
     Type: String
     Default: my-deployment
+  ElasticCloudId:
+    Type: String
+    Description: Elastic Cloud Id Secure String
+  ElasticSecretKey:
+    Type: String
+    Description: Elastic Cloud Secure Key String
   KeyPairName:
     Description: Name of an existing public/private key pair. If you do not have one in this AWS Region,
       please create it before continuing.
@@ -158,7 +172,7 @@ Mappings:
     sa-east-1:
       US2004HVM: ami-0312c74c38dc7bae6
     us-east-1:
-      US2004HVM: ami-0db6c6238a40c0681
+      US2004HVM: ami-090fa75af13c156b4 #ami-0db6c6238a40c0681
     us-east-2:
       US2004HVM: ami-03b6c8bd55e00d5ed
     us-west-1:
@@ -331,6 +345,9 @@ Resources:
       DeliveryStreamName: !Sub "${DeploymentName}-stream"
       DeliveryStreamType: "DirectPut"
       ExtendedS3DestinationConfiguration:
+        BufferingHints:
+          IntervalInSeconds: 60
+          SizeInMBs: 1
         BucketARN: 
           Fn::GetAtt:
           -  FirehoseS3Bucket
@@ -446,7 +463,49 @@ Resources:
         - IpProtocol: tcp
           FromPort: 6780
           ToPort: 6800
-          CidrIp: !Ref RemoteAccessCIDR             
+          CidrIp: !Ref RemoteAccessCIDR 
+  FilebeatEC2IAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: '/'
+      RoleName: !Sub "${DeploymentName}-FilebeatEC2IAMRole"
+      # Policies:
+      #  - PolicyName: !Sub "${DeploymentName}-FilebeatEC2IAMPolicy"
+      #    PolicyDocument:
+      #      Version: '2012-10-17'
+      #      Statement:
+      #      - Effect: Allow
+      #        Action:
+      #        - s3:AbortMultipartUpload
+      #        - s3:GetBucketLocation
+      #        - s3:GetObject
+      #        - s3:ListBucket
+      #        - s3:ListBucketMultipartUploads
+      #        - sqs:ListQueues
+      #        - sqs:GetQueueUrl
+      #        - sqs:ReceiveMessage
+      #        - sqs:GetQueueAttribute
+      #        - sqs:ChangeMessageVisibility
+      #        - sqs:DeleteMessage
+      #        Resource:
+      #        - !GetAtt SQSforBeats.Arn
+      #        - !GetAtt FirehoseS3Bucket.Arn
+  Ec2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties: 
+      InstanceProfileName: !Sub "${DeploymentName}-filebeat-ec2-instance-profile"
+      Path: /
+      Roles: 
+       - !Ref FilebeatEC2IAMRole          
   LaunchConfig:
     Type: AWS::AutoScaling::LaunchConfiguration
     Properties:
@@ -458,6 +517,7 @@ Resources:
       SecurityGroups:
         - !GetAtt EC2SecurityGroup.GroupId
       InstanceType: !Ref EC2InstanceType
+      IamInstanceProfile: !Ref Ec2InstanceProfile
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
@@ -466,6 +526,26 @@ Resources:
             Encrypted: true
             DeleteOnTermination: true
       LaunchConfigurationName: !Ref DeploymentName
+      UserData:
+        'Fn::Base64': !Sub
+           - |
+             #!/bin/bash -ex
+             yum update -y
+             curl -L -O https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-8.3.3-x86_64.rpm
+             sudo rpm -vi filebeat-8.3.3-x86_64.rpm
+             sleep 10
+             sudo sed -i '124 a cloud.id: "${ElasticCloudId}"' /etc/filebeat/filebeat.yml
+             sudo sed -i '128 a cloud.auth: "elastic:${ElasticSecretKey}"' /etc/filebeat/filebeat.yml
+             sudo sed -i '34 a - type: aws-s3' /etc/filebeat/filebeat.yml
+             sudo sed -i '35 a\  queue_url: ${SQSurl}' /etc/filebeat/filebeat.yml
+             sudo sed -i '36 a\  access_key_id: ${AccessKey}' /etc/filebeat/filebeat.yml
+             sudo sed -i '37 a\  secret_access_key: ${SecretAccessKey}' /etc/filebeat/filebeat.yml
+             sudo filebeat setup
+
+           - SQSurl: !Ref SQSforBeats
+             AccessKey: !Ref FilebeatUserAccessKey
+             SecretAccessKey: !GetAtt FilebeatUserAccessKey.SecretAccessKey
+
     DependsOn: DataProducer
   AutoScalingGroup:
       Type: AWS::AutoScaling::AutoScalingGroup
@@ -481,4 +561,57 @@ Resources:
           - Key: Name
             Value: !Ref DeploymentName
             PropagateAtLaunch: true
-
+  FilebeatUser:
+     Type: 'AWS::IAM::User'
+     Properties:
+       UserName: !Sub "${DeploymentName}-filebeat-user"   
+  FilebeatUserPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Roles: 
+       - !Sub "${DeploymentName}-FilebeatEC2IAMRole"
+      Users: 
+       - !Sub "${DeploymentName}-filebeat-user"
+      PolicyName: !Sub "${DeploymentName}-FilebeatIAMPolicy"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - s3:GetBucketLocation
+          - s3:GetObject
+          - s3:ListBucket
+          - sqs:ListQueues
+          - sqs:GetQueueUrl
+          - sqs:ReceiveMessage
+          - sqs:GetQueueAttribute
+          - sqs:ChangeMessageVisibility
+          - sqs:DeleteMessage
+          Resource:
+          - !Sub "arn:aws:sqs:${Region}:${AWS::AccountId}:${DeploymentName}-SQSforBeats"
+          - !Sub "arn:aws:s3:::${DeploymentName}-bucket"
+          - !Sub "arn:aws:s3:::${DeploymentName}-bucket/*"
+  FilebeatUserAccessKey:
+    Type: 'AWS::IAM::AccessKey'
+    Properties:
+      Status: Active
+      UserName: !Sub "${DeploymentName}-filebeat-user"
+    DependsOn: FilebeatUser
+  FilebeatSecretManagerAccessKey:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties: 
+      Description: !Sub "These are the credentials for the IAM User ${FilebeatUser}"
+      Name: !Sub "${DeploymentName}-AccessKey"
+      SecretString: !Join
+        - ""
+        - - !Ref FilebeatUserAccessKey
+    DependsOn: FilebeatUserAccessKey
+  FilebeatSecretManagerSecretAccessKey:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties: 
+      Description: !Sub "These are the credentials for the IAM User ${FilebeatUser}"
+      Name: !Sub "${DeploymentName}-SecretAccessKey"
+      SecretString: !Join
+        - ""
+        - - !GetAtt FilebeatUserAccessKey.SecretAccessKey
+    DependsOn: FilebeatUserAccessKey
