@@ -1,6 +1,6 @@
 # Kinesis Firehose to Elastic Cloud deployment
 
-*Kinesis Firehose to Elastic Cloud is one of few options for send data elastic deployment
+* Kinesis Firehose to Elastic Cloud is one of few options for send data elastic deployment
 
 # Usage elastic-create-deployment service:
 Cloud formation templates contain main.yml template.
