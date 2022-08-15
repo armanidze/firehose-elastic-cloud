@@ -318,8 +318,13 @@ Resources:
   CloudwatchLogGroup:
     Type: 'AWS::Logs::LogGroup'
     Properties:
-      LogGroupName: !Sub "/aws/kinesisfirehose/${DeploymentName}-stream"
+      LogGroupName: !Sub "/aws/kinesisfirehose/${DeploymentName}-loggroup"
       RetentionInDays: 7
+  CloudWatchLogStream:
+    Type: AWS::Logs::LogStream
+    Properties: 
+      LogGroupName: !Ref CloudwatchLogGroup
+      LogStreamName: !Sub "${DeploymentName}-logstream"
   FirehoseS3Bucket:
     Type: 'AWS::S3::Bucket'
     DeletionPolicy: Retain
@@ -329,7 +334,8 @@ Resources:
         ServerSideEncryptionConfiguration:
           - BucketKeyEnabled: TRUE
             ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt KMSEncryption.Arn
       PublicAccessBlockConfiguration:
         BlockPublicAcls: TRUE
         BlockPublicPolicy: TRUE
@@ -344,6 +350,9 @@ Resources:
     Properties:
       DeliveryStreamName: !Sub "${DeploymentName}-stream"
       DeliveryStreamType: "DirectPut"
+      DeliveryStreamEncryptionConfigurationInput:
+        KeyType: CUSTOMER_MANAGED_CMK
+        KeyARN: !GetAtt KMSEncryption.Arn
       ExtendedS3DestinationConfiguration:
         BufferingHints:
           IntervalInSeconds: 60
@@ -354,6 +363,10 @@ Resources:
           -  Arn
         CompressionFormat: UNCOMPRESSED  
         ErrorOutputPrefix: 'error-'
+        CloudWatchLoggingOptions:
+          Enabled: 'true'
+          LogGroupName: !Ref CloudwatchLogGroup
+          LogStreamName: !Ref CloudWatchLogStream
         Prefix: 'firehose-'
         ProcessingConfiguration:
           Enabled: true
@@ -564,7 +577,8 @@ Resources:
   FilebeatUser:
      Type: 'AWS::IAM::User'
      Properties:
-       UserName: !Sub "${DeploymentName}-filebeat-user"   
+       UserName: !Sub "${DeploymentName}-filebeat-user"
+     DependsOn: FilebeatEC2IAMRole
   FilebeatUserPolicy:
     Type: 'AWS::IAM::Policy'
     Properties:
@@ -591,6 +605,7 @@ Resources:
           - !Sub "arn:aws:sqs:${Region}:${AWS::AccountId}:${DeploymentName}-SQSforBeats"
           - !Sub "arn:aws:s3:::${DeploymentName}-bucket"
           - !Sub "arn:aws:s3:::${DeploymentName}-bucket/*"
+    DependsOn: FilebeatUser
   FilebeatUserAccessKey:
     Type: 'AWS::IAM::AccessKey'
     Properties:
@@ -602,6 +617,7 @@ Resources:
     Properties: 
       Description: !Sub "These are the credentials for the IAM User ${FilebeatUser}"
       Name: !Sub "${DeploymentName}-AccessKey"
+      KmsKeyId: !Ref KMSEncryptionAlias
       SecretString: !Join
         - ""
         - - !Ref FilebeatUserAccessKey
@@ -611,7 +627,82 @@ Resources:
     Properties: 
       Description: !Sub "These are the credentials for the IAM User ${FilebeatUser}"
       Name: !Sub "${DeploymentName}-SecretAccessKey"
+      KmsKeyId: !Ref KMSEncryptionAlias
       SecretString: !Join
         - ""
         - - !GetAtt FilebeatUserAccessKey.SecretAccessKey
     DependsOn: FilebeatUserAccessKey
+  KMSEncryption:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: !Sub "${DeploymentName}-kms-key"
+      Enabled: 'true'
+      EnableKeyRotation: 'false'
+      KeyPolicy:
+        Id: key-consolepolicy-3
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: '*'
+          - Sid: Allow access for Key Administrators
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/admin"
+            Action:
+             - kms:Create*
+             - kms:Describe*
+             - kms:Enable*
+             - kms:List*
+             - kms:Put*
+             - kms:Update*
+             - kms:Revoke*
+             - kms:Disable*
+             - kms:Get*
+             - kms:Delete*
+             - kms:TagResource
+             - kms:UntagResource
+             - kms:ScheduleKeyDeletion
+             - kms:CancelKeyDeletion
+            Resource: '*'
+          - Sid: Allow use of the key
+            Effect: Allow
+            Principal:
+              AWS:
+               - !Sub "arn:aws:iam::${AWS::AccountId}:role/admin"
+               - !GetAtt LambdaDataTransformFunctionRole.Arn
+               - !GetAtt KinesisRole.Arn
+               - !GetAtt FilebeatEC2IAMRole.Arn
+               - !GetAtt FilebeatUser.Arn
+            Action:
+             - kms:Encrypt
+             - kms:Decrypt
+             - kms:ReEncrypt*
+             - kms:GenerateDataKey*
+             - kms:DescribeKey
+            Resource: '*'
+          - Sid: Allow attachment of persistent resources
+            Effect: Allow
+            Principal:
+              AWS:
+               - !Sub "arn:aws:iam::${AWS::AccountId}:role/admin"
+               - !GetAtt LambdaDataTransformFunctionRole.Arn
+               - !GetAtt KinesisRole.Arn
+               - !GetAtt FilebeatEC2IAMRole.Arn
+               - !GetAtt FilebeatUser.Arn
+            Action:
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:RevokeGrant
+            Resource: '*'
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: 'true'
+  KMSEncryptionAlias:
+    Type: 'AWS::KMS::Alias'
+    Properties:
+      AliasName: !Sub "alias/${DeploymentName}-key"
+      TargetKeyId: !Ref KMSEncryption
